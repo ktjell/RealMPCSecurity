@@ -1,0 +1,211 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Feb  1 14:23:10 2023
+
+@author: SD59YI
+"""
+
+import numpy as np
+import random
+from scipy.interpolate import lagrange
+from sklearn.covariance import EmpiricalCovariance
+import statistics
+from scipy.optimize import minimize
+from scipy.stats import norm
+
+class Shamir:
+    def __init__(self,n,t,mu,sigma_r,sigma_s,p):
+        self.n = n
+        self.t = t
+        self.mu = mu
+        self.sigma_r = sigma_r
+        self.sigma_s = sigma_s
+        self.p = p
+
+    def gen_shares(self,secret,var = 0):
+        if var == 0:
+            var = self.sigma_s
+        #coefficients = np.empty(self.t+1)
+        shares = np.empty(self.n)
+        y = np.random.normal(self.mu, var, self.t)
+        
+        sub = random.sample(range(self.n), self.t)
+        x_es = np.empty(self.t+1)
+        x_es[0] = 0
+        for i in range(self.t):
+            x_es[i+1] = self.p[sub[i]]
+        
+        for i in range(self.n):
+            shares[i] = 0
+            for j in range(self.t+1):
+                temp = 1
+                for k in range(self.t+1):
+                    if j!=k:
+                        temp = temp*(self.p[i]-x_es[k])/(x_es[j]-x_es[k])
+                if j == 0:
+                    shares[i] = shares[i]+secret*temp
+                else:
+                    shares[i] = shares[i]+y[j-1]*temp
+                    
+        return np.array(shares),y
+       
+    def recon_secret(self,shares,p):
+        L_p = np.empty(len(p))
+        for i in range(len(p)):
+            L_prod = 1
+            for j in range(0,len(p)):
+                if p[i]!=p[j]:
+                    L_prod *= (-p[j])/(p[i]-p[j])
+            L_p[i] = L_prod
+        sums = np.dot(shares,L_p)
+        return sums
+    
+    def gen_triplets(self):
+        a = np.random.normal(self.mu, self.sigma_r)
+        b = np.random.normal(self.mu, self.sigma_r)
+        c = a*b
+        return self.gen_shares(a)[0], self.gen_shares(b)[0], self.gen_shares(c)[0]
+    
+    def mult_with_triplet(self, share_1, share_2, share_a, share_b, share_c):
+        
+        d = share_1 - share_a
+        e = share_2 - share_b
+        
+        d_rec = self.recon_secret(d,self.p)
+        e_rec = self.recon_secret(e,self.p)
+        
+        res = d_rec*e_rec*np.ones(self.n) + d_rec*share_b + e_rec*share_a + share_c
+        
+        return res, d, e
+    
+    def get_inverse(self, share_1, r_shares, a, b, c, p, x_es):
+        
+        sr_mult = self.mult_with_triplet(share_1, r_shares, a, b, c, p, x_es)
+        
+        sr = self.recon_secret(sr_mult,p,x_es)
+        
+        s_inv = r_shares/sr
+        
+        return np.array(s_inv)
+
+p = [1,2,3]
+SS = Shamir(3,1,0,10,1000,p)
+A = [0]
+H=[1,2]
+
+def sim_mult(SS, p, A, H, x1A, x2A, aA, bA, cA, x1x2A):
+    """
+    Generates a view for the adversary (A) for the multiplication protocol. The mult protocol uses a
+    triplet (a,b,c=a*b) by
+    x1*x2 = d*[b] + e*[a] + [c] + de 
+    where d = [x1]-[a] and e = [x2]-[b].
+    The protocol should return the inputs and output of A and the shares of the triplets of A and 
+    the shares of the honest parties of the values d and e, since this is what A sees in the execution.
+    The shares should be consisten, that is A should get x1x2A when computing d*bA + e*aA + cA + de.
+    The idea is to randomly choose a and b, and then calculate c such the the about equality holds. This
+    means a*b != c, however, A cannot see this as he only receives shares of a,b and c.
+    
+    Input parameters
+    ----------
+    SS : Class of Shamirs secret sharing scheme -> with the methods generate shares and reconstruct secret.
+    p : List containing the p-values (x value in shamir scheme) of both A and honest parties.
+    A : List containing the indices of the A parties.
+    H : List containing the indices of the honest parties.
+    x1A : Shares of x1 of A.
+    x2A : Shares of x2 of A.
+    x1x2A : Shares of x1*x2 of A.
+    mu : mean value of chosen normal variables.
+    sigma : Tvariance of chosen normal variable.
+    """
+    pA = np.array([])
+    for i in A:
+        pA = np.append(pA,p[i])
+    pH = np.array([])
+    for i in H:
+        pH = np.append(pH,p[i])
+        
+
+    #Generate the shares of d and e of the adversary parties and the honest parties
+    dA = x1A - aA               #Make sure adversary gets his shares of d and e
+    eA = x2A - bA
+    
+    #d_prime_0 = np.random.normal(0, SS.sigma_r)
+    #e_prime_0 = (x1x2A-d_prime_0*bA-cA)/(aA+d_prime_0)
+    
+    #OPTIMISATION USING SCIPY
+    d_prime_0 = np.random.normal(0, SS.sigma_r)
+    e_prime_0 = np.random.normal(0, SS.sigma_r)
+    def Obj_func(x):
+        d_prime,e_prime=x
+        f=((d_prime-d_prime_0)**2+(e_prime-e_prime_0)**2)**(1/2)
+        return f
+    cons = ({'type': 'eq', 'fun': lambda x:  -x1x2A+x[0]*bA+x[1]*aA+x[0]*x[1]+cA})
+
+    res = minimize(Obj_func, (d_prime_0,e_prime_0), constraints=cons, tol=0.01)
+    
+
+    #print(-x1x2A+res.x[0]*bA+res.x[1]*aA+res.x[0]*res.x[1]+cA)
+    d_prime_poly = lagrange(np.append(pA,0),np.append(dA,res.x[0]))
+    dH = d_prime_poly(pH) 
+    e_prime_poly = lagrange(np.append(pA,0), np.append(eA,res.x[1]))
+    eH = e_prime_poly(pH)
+    
+    return np.concatenate((x1A,x2A,aA,bA,cA,dH,eH), axis=None), res.x[1], res.x[0]
+#x1A, x2A, aS[A], bS[A], cA, dH, eH, x1x2A
+
+# def real_mult(SS,A,H, x1S, x2S,a,b,c):
+#     #a,b,c = SS.gen_triplets()
+#     res, d,e = SS.mult_with_triplet(x1S,x2S,a,b,c)
+    
+#     return np.concatenate((x1S[A], x2S[A], a[A], b[A], c[A], d[H], e[H], res), axis = None)
+
+    
+def genData(n,SS,length):
+    SS = Shamir(3,1,0,100,100000,p)
+    x1 = np.random.normal(0, 1)
+    x2 = np.random.normal(1, 1)
+    
+    Views_R = np.zeros((n,length))
+    Views_I = np.zeros((n,length))
+    e_prime = np.zeros(n)
+    d_prime = np.zeros(n)
+    
+    
+    for i in range(n):
+        a,b,c = SS.gen_triplets()
+        x1S = SS.gen_shares(x1)[0]
+        x2S = SS.gen_shares(x2)[0]
+        
+        
+        res, d,e = SS.mult_with_triplet(x1S,x2S,a,b,c)
+        np.concatenate((x1S[A], x2S[A], a[A], b[A], c[A], d[H], e[H], res), axis = None)
+        Views_R[i,:] =  np.concatenate((x1S[A], x2S[A], a[A], b[A], c[A], d[H], e[H], res), axis = None)
+        
+        x1A = x1S[A]
+        x2A = x2S[A]
+        aA = a[A]
+        bA = b[A]
+        cA = c[A]
+        x1x2A = res[A]
+        temp,e_temp,d_temp = sim_mult(SS, p, A, H, x1A, x2A, aA, bA, cA, x1x2A)
+        Views_I[i,:] = np.append(temp,res)
+        e_prime[i] = e_temp
+        d_prime[i] = d_temp
+
+        
+    return Views_R,Views_I,e_prime,d_prime
+
+length = 12
+
+View_R,View_I,e_prime,d_prime = genData(500000,SS,length)
+cov_R = EmpiricalCovariance().fit(View_R)
+cov_R = cov_R.covariance_
+cov_I = EmpiricalCovariance().fit(View_I)
+cov_I = cov_I.covariance_
+cov_e = EmpiricalCovariance().fit(e_prime.reshape(-1,1))
+cov_e = cov_e.covariance_
+cov_d = EmpiricalCovariance().fit(d_prime.reshape(-1,1))
+cov_d = cov_d.covariance_
+mat = np.dot(np.linalg.inv(cov_I),cov_R)-np.eye(12)
+np.linalg.eigvals(mat)
+eig = np.linalg.eigvals(mat)
